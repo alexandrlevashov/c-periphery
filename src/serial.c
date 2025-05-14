@@ -26,6 +26,8 @@
 
 #if defined(__APPLE__)
 #include <IOKit/serial/ioss.h>
+#include <sys/filio.h>
+#define TIOCINQ FIONREAD
 #endif
 
 
@@ -372,10 +374,8 @@ int serial_flush(serial_t *serial) {
 }
 
 
-#include <sys/filio.h>
-
 int serial_input_waiting(serial_t *serial, unsigned int *count) {
-    if (ioctl(serial->fd, FIONREAD /*TIOCINQ*/, count) < 0)
+    if (ioctl(serial->fd, TIOCINQ, count) < 0)
         return _serial_error(serial, SERIAL_ERROR_IO, errno, "TIOCINQ query");
 
     return 0;

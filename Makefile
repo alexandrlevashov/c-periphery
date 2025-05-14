@@ -8,7 +8,7 @@ MACHTYPE:=$(shell set | grep ^MACHTYPE= | sed s-.*=--)
 $(info MACHTYPE=$(MACHTYPE))
 ifeq ($(findstring darwin,$(MACHTYPE)),darwin)
     # Found
-    SRCS = $(PROCESSOR_ARCHITECTURE) src/serial.c src/version.c
+    SRCS = src/serial.c src/version.c
 		CFLAGS += -arch x86_64
 else
     SRCS = src/gpio.c src/gpio_cdev_v2.c src/gpio_cdev_v1.c src/gpio_sysfs.c src/led.c src/pwm.c src/spi.c src/i2c.c src/mmio.c src/serial.c src/version.c

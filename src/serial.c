@@ -23,6 +23,12 @@
 
 #include "serial.h"
 
+
+#if defined(__APPLE__)
+#include <IOKit/serial/ioss.h>
+#endif
+
+
 struct serial_handle {
     int fd;
     bool use_termios_timeout;
@@ -67,6 +73,9 @@ void serial_free(serial_t *serial) {
 }
 
 static int _serial_baudrate_to_bits(uint32_t baudrate) {
+#if defined(__APPLE__)
+    return (int) baudrate;
+#else
     switch (baudrate) {
         case 50: return B50;
         case 75: return B75;
@@ -94,6 +103,7 @@ static int _serial_baudrate_to_bits(uint32_t baudrate) {
         case 1152000: return B1152000;
         case 1500000: return B1500000;
         case 2000000: return B2000000;
+                      
 #ifdef B2500000
         case 2500000: return B2500000;
 #endif
@@ -106,11 +116,16 @@ static int _serial_baudrate_to_bits(uint32_t baudrate) {
 #ifdef B4000000
         case 4000000: return B4000000;
 #endif
+
         default: return -1;
     }
+#endif
 }
 
 static int _serial_bits_to_baudrate(uint32_t bits) {
+#if defined(__APPLE__)
+    return (int) bits;
+#else
     switch (bits) {
         case B0: return 0;
         case B50: return 50;
@@ -153,11 +168,14 @@ static int _serial_bits_to_baudrate(uint32_t bits) {
 #endif
         default: return -1;
     }
+#endif
 }
 
 int serial_open(serial_t *serial, const char *path, uint32_t baudrate) {
     return serial_open_advanced(serial, path, baudrate, 8, PARITY_NONE, 1, false, false);
 }
+
+
 
 int serial_open_advanced(serial_t *serial, const char *path, uint32_t baudrate, unsigned int databits, serial_parity_t parity, unsigned int stopbits, bool xonxoff, bool rtscts) {
     struct termios termios_settings;
@@ -189,7 +207,6 @@ int serial_open_advanced(serial_t *serial, const char *path, uint32_t baudrate, 
         termios_settings.c_iflag |= ISTRIP;
     if (xonxoff)
         termios_settings.c_iflag |= (IXON | IXOFF);
-
     /* c_oflag */
     termios_settings.c_oflag = 0;
 
@@ -223,21 +240,80 @@ int serial_open_advanced(serial_t *serial, const char *path, uint32_t baudrate, 
     /* RTS/CTS */
     if (rtscts)
         termios_settings.c_cflag |= CRTSCTS;
+    
 
     /* Baudrate */
     cfsetispeed(&termios_settings, _serial_baudrate_to_bits(baudrate));
     cfsetospeed(&termios_settings, _serial_baudrate_to_bits(baudrate));
+    
+#if defined(__APPLE__) 
+    //     
+    termios_settings.c_ispeed = 38400;
+    termios_settings.c_ospeed = 38400;
+#endif
+
+#if 0
+// из pySerial сдампил
+    termios_settings.c_iflag = 0;
+    termios_settings.c_oflag = 0; 
+    termios_settings.c_cflag = 57088;
+    termios_settings.c_lflag = 0;
+    termios_settings.c_iflag = 0;
+    termios_settings.c_ispeed = 38400;
+    termios_settings.c_ospeed = 38400;
+    termios_settings.c_cc[0] = 0x04;
+    termios_settings.c_cc[1] = 0xff;
+    termios_settings.c_cc[2] = 0xff;
+    termios_settings.c_cc[3] = 0x7f;
+    termios_settings.c_cc[4] = 0x17;
+    termios_settings.c_cc[5] = 0x15;
+    termios_settings.c_cc[6] = 0x12;
+    termios_settings.c_cc[7] = 0xff;
+    termios_settings.c_cc[8] = 0x03;
+    termios_settings.c_cc[9] = 0x1c;
+    termios_settings.c_cc[10] = 0x1a;
+    termios_settings.c_cc[11] = 0x19;
+    termios_settings.c_cc[12] = 0x11;
+    termios_settings.c_cc[13] = 0x13;
+    termios_settings.c_cc[14] = 0x16;
+    termios_settings.c_cc[15] = 0x0f;
+    termios_settings.c_cc[16] = 0x00; //VMIN
+    termios_settings.c_cc[17] = 0x00; //VTIME
+    termios_settings.c_cc[18] = 0x14;
+    termios_settings.c_cc[19] = 0xff;
+#endif
+
 
     /* Set termios attributes */
     if (tcsetattr(serial->fd, TCSANOW, &termios_settings) < 0) {
         int errsv = errno;
         close(serial->fd);
         serial->fd = -1;
-        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errsv, "Setting serial port attributes");
+        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errsv, "Setting serial port attributes  tcsetattr cflag= %d", termios_settings.c_cflag);
     }
+
+#if defined(__APPLE__) 
+    // Try custom baudrate (MacOS only)
+    // #define IOSSIOSPEED2 0x80045402
+    speed_t speed = baudrate; // Set 14400 baud
+    if (ioctl(serial->fd, IOSSIOSPEED, &speed) == -1) {
+        int errsv = errno;
+        close(serial->fd);
+        serial->fd = -1;
+        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errsv, "Error calling ioctl(..., IOSSIOSPEED, ...)");
+    }
+
+    ioctl(serial->fd, TIOCCBRK);
+
+#endif
 
     serial->use_termios_timeout = false;
 
+    ioctl(serial->fd, TIOCMBIS, TIOCM_DTR);
+    ioctl(serial->fd, TIOCMBIS, TIOCM_RTS);
+
+    tcflush( serial->fd, TCIOFLUSH );
+    
     return 0;
 }
 
@@ -281,7 +357,6 @@ int serial_read(serial_t *serial, uint8_t *buf, size_t len, int timeout_ms) {
 
 int serial_write(serial_t *serial, const uint8_t *buf, size_t len) {
     ssize_t ret;
-
     if ((ret = write(serial->fd, buf, len)) < 0)
         return _serial_error(serial, SERIAL_ERROR_IO, errno, "Writing serial port");
 
@@ -296,8 +371,11 @@ int serial_flush(serial_t *serial) {
     return 0;
 }
 
+
+#include <sys/filio.h>
+
 int serial_input_waiting(serial_t *serial, unsigned int *count) {
-    if (ioctl(serial->fd, TIOCINQ, count) < 0)
+    if (ioctl(serial->fd, FIONREAD /*TIOCINQ*/, count) < 0)
         return _serial_error(serial, SERIAL_ERROR_IO, errno, "TIOCINQ query");
 
     return 0;
@@ -464,7 +542,7 @@ int serial_set_baudrate(serial_t *serial, uint32_t baudrate) {
     cfsetospeed(&termios_settings, _serial_baudrate_to_bits(baudrate));
 
     if (tcsetattr(serial->fd, TCSANOW, &termios_settings) < 0)
-        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes");
+        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes boudrate");
 
     return 0;
 }
@@ -489,7 +567,7 @@ int serial_set_databits(serial_t *serial, unsigned int databits) {
         termios_settings.c_cflag |= CS8;
 
     if (tcsetattr(serial->fd, TCSANOW, &termios_settings) < 0)
-        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes");
+        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes databits");
 
     return 0;
 }
@@ -514,7 +592,7 @@ int serial_set_parity(serial_t *serial, enum serial_parity parity) {
         termios_settings.c_cflag |= (PARENB | PARODD);
 
     if (tcsetattr(serial->fd, TCSANOW, &termios_settings) < 0)
-        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes");
+        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes set pariry");
 
     return 0;
 }
@@ -533,7 +611,7 @@ int serial_set_stopbits(serial_t *serial, unsigned int stopbits) {
         termios_settings.c_cflag |= CSTOPB;
 
     if (tcsetattr(serial->fd, TCSANOW, &termios_settings) < 0)
-        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes");
+        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes set stopbits");
 
     return 0;
 }
@@ -580,9 +658,8 @@ int serial_set_vmin(serial_t *serial, unsigned int vmin) {
         return _serial_error(serial, SERIAL_ERROR_QUERY, errno, "Getting serial port attributes");
 
     termios_settings.c_cc[VMIN] = vmin;
-
     if (tcsetattr(serial->fd, TCSANOW, &termios_settings) < 0)
-        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes");
+        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes vmin");
 
     serial->use_termios_timeout = vmin > 0;
 
@@ -601,7 +678,7 @@ int serial_set_vtime(serial_t *serial, float vtime) {
     termios_settings.c_cc[VTIME] = ((unsigned int)(vtime * 10));
 
     if (tcsetattr(serial->fd, TCSANOW, &termios_settings) < 0)
-        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes");
+        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, errno, "Setting serial port attributes vtime %f vtime", vtime);
 
     return 0;
 }
